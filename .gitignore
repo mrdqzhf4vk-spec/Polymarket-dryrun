@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# Runtime artifacts
+bot.log
+polymarket.db
+state.json
+
+# Environment
+.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
