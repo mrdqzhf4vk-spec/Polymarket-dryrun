@@ -72,9 +72,14 @@ async def run() -> None:
                 # ── 1. Find active market ──────────────────────────────────
                 market = await client.find_active_btc_5min_market()
                 if not market:
-                    live.update(make_waiting_display(
-                        "No active BTC 5-min market found – retrying…"
-                    ))
+                    msg = "No active BTC 5-min market found – retrying…"
+                    if client.is_stale():
+                        msg = (
+                            "API unreachable (403 – datacenter IP blocked).\n"
+                            "  Set HTTPS_PROXY=http://user:pass@host:port in .env\n"
+                            "  and restart."
+                        )
+                    live.update(make_waiting_display(msg))
                     await asyncio.sleep(SEARCH_RETRY)
                     continue
 

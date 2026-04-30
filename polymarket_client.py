@@ -10,6 +10,7 @@ Primary data sources (in order of preference):
 import asyncio
 import json
 import logging
+import os
 import time
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -36,10 +37,20 @@ class PolymarketClient:
         self._stale = False
 
     async def __aenter__(self) -> "PolymarketClient":
+        # Polymarket blocks datacenter IPs. Set HTTP_PROXY / HTTPS_PROXY in .env
+        # (or the environment) to route through a residential proxy.
+        proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY")
         self._client = httpx.AsyncClient(
             timeout=httpx.Timeout(15.0, connect=5.0),
             follow_redirects=True,
-            headers={"Accept": "application/json"},
+            proxy=proxy,
+            headers={
+                "Accept": "application/json",
+                "User-Agent": (
+                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+                ),
+            },
         )
         return self
 
@@ -65,6 +76,17 @@ class PolymarketClient:
                     logger.warning("Rate-limited %s; waiting %.1fs", url, wait)
                     await asyncio.sleep(wait)
                     continue
+                if resp.status_code == 403:
+                    reason = resp.headers.get("x-deny-reason", "")
+                    logger.error(
+                        "403 Forbidden%s for %s – "
+                        "Polymarket blocks datacenter IPs. "
+                        "Set HTTPS_PROXY in .env to use a residential proxy.",
+                        f" ({reason})" if reason else "",
+                        url,
+                    )
+                    self._stale = True
+                    return None  # no point retrying a hard block
                 resp.raise_for_status()
                 self._stale = False
                 return resp.json()
