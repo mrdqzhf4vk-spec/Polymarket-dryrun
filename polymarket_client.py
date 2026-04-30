@@ -380,6 +380,38 @@ class PolymarketClient:
             skip += 100
         return all_pos
 
+    # ── BTC spot price ────────────────────────────────────────────────────────
+
+    async def get_btc_price(self) -> Optional[float]:
+        """Fetch current BTC/USD price. Tries Binance → Kraken → CoinGecko."""
+        sources = [
+            ("binance",   "https://api.binance.com/api/v3/ticker/price",
+             {"symbol": "BTCUSDT"}),
+            ("kraken",    "https://api.kraken.com/0/public/Ticker",
+             {"pair": "XBTUSD"}),
+            ("coingecko", "https://api.coingecko.com/api/v3/simple/price",
+             {"ids": "bitcoin", "vs_currencies": "usd"}),
+        ]
+        for name, url, params in sources:
+            try:
+                resp = await self._client.get(url, params=params,
+                                              timeout=httpx.Timeout(5.0))
+                if resp.status_code != 200:
+                    continue
+                data = resp.json()
+                if name == "binance":
+                    return float(data["price"])
+                if name == "kraken":
+                    pairs = data.get("result", {})
+                    key = next(iter(pairs), None)
+                    if key:
+                        return float(pairs[key]["c"][0])
+                if name == "coingecko":
+                    return float(data["bitcoin"]["usd"])
+            except Exception as exc:
+                logger.debug("BTC price from %s failed: %s", name, exc)
+        return None
+
     # ── Recent trades ─────────────────────────────────────────────────────────
 
     async def get_recent_trades(self, condition_id: str, limit: int = 50) -> list[dict]:

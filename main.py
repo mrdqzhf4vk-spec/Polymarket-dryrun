@@ -54,11 +54,14 @@ async def run() -> None:
     logger.info("DB initialised")
 
     session_start = int(time.time())
-    # Track the market we last processed so we know when it changed
     current_market_id: Optional[str] = None
-    # Keep the last prices/smart so we can log accuracy on resolution
-    last_market_prob = 0.5
-    last_smart_prob  = 0.5
+    last_market_prob  = 0.5
+    last_smart_prob   = 0.5
+    open_prob_up: Optional[float] = None   # first observed price for this market
+    btc_price:    Optional[float] = None
+    last_btc_price: Optional[float] = None
+    btc_direction = ""
+    _tick = 0
 
     async with PolymarketClient() as client:
         with Live(
@@ -69,6 +72,8 @@ async def run() -> None:
         ) as live:
 
             while True:
+                _tick += 1
+
                 # ── 1. Find active market ──────────────────────────────────
                 market = await client.find_active_btc_5min_market()
                 if not market:
@@ -88,12 +93,26 @@ async def run() -> None:
 
                 if market_id != current_market_id:
                     current_market_id = market_id
+                    open_prob_up = None  # reset reference price for new market
                     logger.info("Tracking market %s – %s", market_id[:16], question)
 
                 # ── 2. Fetch prices ────────────────────────────────────────
                 prices = await client.get_market_prices(market)
                 market_prob_up = prices["yes_price"]
                 last_market_prob = market_prob_up
+                if open_prob_up is None:
+                    open_prob_up = market_prob_up  # snapshot the first price we see
+
+                # ── 2b. BTC spot price (every 4 ticks ≈ 32 s) ────────────
+                if _tick % 4 == 1:
+                    new_btc = await client.get_btc_price()
+                    if new_btc is not None:
+                        btc_direction = (
+                            "↑" if (last_btc_price and new_btc > last_btc_price) else
+                            "↓" if (last_btc_price and new_btc < last_btc_price) else ""
+                        )
+                        last_btc_price = btc_price
+                        btc_price = new_btc
 
                 # ── 3. Fetch all open positions ────────────────────────────
                 positions = await client.get_positions_for_market(market_id)
@@ -123,12 +142,16 @@ async def run() -> None:
                         continue
                     sc, label = wallet_scores.get(addr, (0.5, "NEW"))
                     row = db.get_wallet(addr)
+                    # Convert shares → approximate USD using current token price
+                    outcome = pos.get("outcome", "UP")
+                    token_price = market_prob_up if outcome == "UP" else (1.0 - market_prob_up)
+                    amount_usd = float(pos.get("size", 0) or 0) * token_price
                     trader_rows.append({
-                        "address":   addr,
-                        "side":      pos.get("outcome", "?"),
-                        "amount":    pos.get("size", 0.0),
-                        "score":     sc,
-                        "label":     label,
+                        "address":    addr,
+                        "side":       outcome,
+                        "amount":     amount_usd,
+                        "score":      sc,
+                        "label":      label,
                         "win_count":  int(row["win_count"])  if row else 0,
                         "loss_count": int(row["loss_count"]) if row else 0,
                     })
@@ -153,32 +176,35 @@ async def run() -> None:
                         )
 
                 # ── 7. Calculate remaining time ────────────────────────────
-                end_ts     = PolymarketClient.get_market_end_time(market)
-                closes_in  = max(0, int(end_ts - time.time())) if end_ts else None
+                end_ts    = PolymarketClient.get_market_end_time(market)
+                closes_in = max(0, int(end_ts - time.time())) if end_ts else None
 
                 # ── 8. Session accuracy ────────────────────────────────────
-                recent      = db.get_recent_markets(5)
+                recent     = db.get_recent_markets(5)
                 s_correct, s_total = db.get_session_accuracy(session_start)
 
                 # ── 9. Refresh display ─────────────────────────────────────
                 live.update(make_full_display(
-                    question       = question,
-                    closes_in_secs = closes_in,
-                    market_prob_up = market_prob_up,
-                    smart_prob_up  = prob.smart_prob_up,
-                    confidence     = prob.confidence,
-                    scored_count   = prob.scored_count,
-                    signal_label   = prob.signal_label,
-                    is_stale       = client.is_stale(),
-                    traders        = trader_rows,
-                    recent_markets = recent,
-                    session_correct= s_correct,
-                    session_total  = s_total,
+                    question        = question,
+                    closes_in_secs  = closes_in,
+                    market_prob_up  = market_prob_up,
+                    smart_prob_up   = prob.smart_prob_up,
+                    confidence      = prob.confidence,
+                    scored_count    = prob.scored_count,
+                    signal_label    = prob.signal_label,
+                    is_stale        = client.is_stale(),
+                    traders         = trader_rows,
+                    recent_markets  = recent,
+                    session_correct = s_correct,
+                    session_total   = s_total,
+                    btc_price       = btc_price,
+                    btc_direction   = btc_direction,
+                    open_prob_up    = open_prob_up,
                 ))
 
-                # ── 10. Resolution detection ───────────────────────────────
+                # ── 10. Resolution detection (metadata only on even ticks) ─
                 resolved, result = await _detect_resolution(
-                    client, market, market_id, market_prob_up
+                    client, market, market_id, market_prob_up, _tick
                 )
 
                 if resolved:
@@ -217,16 +243,20 @@ async def _detect_resolution(
     market: dict,
     market_id: str,
     market_prob_up: float,
+    tick: int = 0,
 ) -> tuple[bool, str]:
     """Return (is_resolved, result) where result is 'UP' or 'DOWN'."""
 
-    # Price snap – the fastest signal
+    # Price snap – always check, costs nothing
     if market_prob_up >= RESOLVED_HIGH:
         return True, "UP"
     if market_prob_up <= RESOLVED_LOW:
         return True, "DOWN"
 
-    # Metadata check (slower – only run every other tick to reduce API calls)
+    # Metadata check – only on even ticks to halve the API call rate
+    if tick % 2 != 0:
+        return False, ""
+
     detail = await client.get_market_detail(market_id)
     if not detail:
         return False, ""

@@ -26,12 +26,10 @@ def _bar(ratio: float, width: int = 12) -> str:
 
 
 def _split_bar(left_ratio: float, width: int = 10) -> str:
-    """Two-colour bar: left side fills from right; right side fills from left."""
+    """Fixed-width bar: UP fills from left, DOWN fills from right. Always width chars."""
     left_ratio = max(0.0, min(1.0, left_ratio))
-    right_ratio = 1.0 - left_ratio
-    l_filled = round(left_ratio * width)
-    r_filled = round(right_ratio * width)
-    return _EMPTY * (width - l_filled) + _FULL * l_filled + _FULL * r_filled + _EMPTY * (width - r_filled)
+    filled = round(left_ratio * width)
+    return _FULL * filled + _EMPTY * (width - filled)
 
 
 # ── Header / market summary panel ─────────────────────────────────────────────
@@ -45,6 +43,9 @@ def make_header_panel(
     scored_count: int,
     signal_label: str,
     is_stale: bool,
+    btc_price: Optional[float] = None,
+    btc_direction: str = "",
+    open_prob_up: Optional[float] = None,
 ) -> Panel:
     up_pct  = round(market_prob_up * 100)
     dn_pct  = 100 - up_pct
@@ -60,11 +61,31 @@ def make_header_panel(
 
     stale_tag = "  [bold red blink]STALE[/bold red blink]" if is_stale else ""
 
+    # BTC spot price
+    if btc_price is not None:
+        dir_color = "green" if btc_direction == "↑" else "red" if btc_direction == "↓" else "white"
+        dir_tag   = f" [{dir_color}]{btc_direction}[/{dir_color}]" if btc_direction else ""
+        btc_str   = f"[dim]BTC[/dim] [bold yellow]${btc_price:,.0f}[/bold yellow]{dir_tag}   "
+    else:
+        btc_str = ""
+
     # Direction arrow on smart line
     if "INSUFFICIENT" not in confidence and "NO DATA" not in confidence:
         arrow = " [bold green]▲[/bold green]" if smart_prob_up > market_prob_up else " [bold red]▼[/bold red]"
     else:
         arrow = ""
+
+    # Market drift since we started watching
+    if open_prob_up is not None:
+        drift = round((market_prob_up - open_prob_up) * 100)
+        if drift > 0:
+            drift_str = f" [dim](+{drift}% since open)[/dim]"
+        elif drift < 0:
+            drift_str = f" [dim]({drift}% since open)[/dim]"
+        else:
+            drift_str = ""
+    else:
+        drift_str = ""
 
     mkt_bar   = _split_bar(market_prob_up)
     smart_bar = _split_bar(smart_prob_up)
@@ -86,11 +107,11 @@ def make_header_panel(
     lines = Text.assemble(
         Text.from_markup(
             f"  [bold cyan]₿ BTC 5-MIN MARKET[/bold cyan]{stale_tag}"
-            f"      [dim]Closes in:[/dim] {closes_str}\n"
+            f"   {btc_str}[dim]Closes in:[/dim] {closes_str}\n"
             "\n"
             f"  [dim]Market odds:[/dim]   "
             f"[bold green]UP {up_pct:2d}%[/bold green]  {mkt_bar}  "
-            f"[bold red]DOWN {dn_pct:2d}%[/bold red]\n"
+            f"[bold red]DOWN {dn_pct:2d}%[/bold red]{drift_str}\n"
             f"  [dim]Smart  odds:[/dim]   "
             f"[bold green]UP {s_up:2d}%[/bold green]  {smart_bar}  "
             f"[bold red]DOWN {s_dn:2d}%[/bold red]{arrow}\n"
@@ -257,11 +278,17 @@ def make_full_display(
     recent_markets: list,
     session_correct: int,
     session_total: int,
+    btc_price: Optional[float] = None,
+    btc_direction: str = "",
+    open_prob_up: Optional[float] = None,
 ) -> Group:
     return Group(
         make_header_panel(
             question, closes_in_secs, market_prob_up, smart_prob_up,
             confidence, scored_count, signal_label, is_stale,
+            btc_price=btc_price,
+            btc_direction=btc_direction,
+            open_prob_up=open_prob_up,
         ),
         make_traders_panel(traders),
         make_history_panel(recent_markets, session_correct, session_total),
